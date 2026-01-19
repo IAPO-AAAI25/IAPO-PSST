@@ -16,7 +16,15 @@ python3 example_runner.py --env synth_bernoulli --agent psst --budget 500 --test
 python3 example_runner.py --run-all --budget 300 --test 100
 ```
 
-Notes:
-- The demo runner uses small randomly generated environments; it does **not** require the `data/*.pkl` files.
-- `--env cat_bon` uses the Best-of-N (`bon`) utility; `--env synth_bernoulli` and `--env cat_mv` use Majority Voting (`mv`).
+## Run with pickled datasets
 
+If you have `data/*.pkl` files (e.g., `data/HH_final.pkl`), you can load them and run an agent on the stored env list:
+
+```bash
+python3 example_runner.py --pkl data/HH_final.pkl --agent psst --budget 3000 --test 1000 --first-k 5
+```
+
+Notes:
+- The demo runner uses small randomly generated environments by default; it does **not** require the `data/*.pkl` files.
+- `--first-k` limits how many envs are loaded from the pickle (useful for a quick test).
+- `--env cat_bon` uses the Best-of-N (`bon`) utility; `--env synth_bernoulli` and `--env cat_mv` use Majority Voting (`mv`).

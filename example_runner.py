@@ -10,12 +10,15 @@ Examples
   python example_runner.py --list
   python example_runner.py --env synth_bernoulli --agent psst --budget 500 --test 200
   python example_runner.py --run-all --budget 300 --test 100
+  python example_runner.py --pkl data/HH_final.pkl --agent psst --budget 3000 --test 1000 --first-k 5
 """
 
 from __future__ import annotations
 
 import argparse
+import pickle
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Tuple
 
 import numpy as np
@@ -33,6 +36,9 @@ from Agents.random_agent import RandomAgent
 from Envs.catBoN.catBoN import CategoricalBoNEnv
 from Envs.catMV.catMV import CategoricalMVEnv
 from Envs.synthBernoulli.synthBernoulli import SyntheticBernoulliEnv
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 @dataclass(frozen=True)
@@ -217,6 +223,82 @@ def run_one(env_key: str, agent_key: str, budget: int, test_steps: int, seed: in
     return evaluate(agent, env, test_steps=int(test_steps))
 
 
+def _load_envs_from_pickle(pkl_path: str) -> list[Any]:
+    path = Path(pkl_path)
+    if not path.is_absolute():
+        path = PROJECT_ROOT / path
+    if not path.exists():
+        raise FileNotFoundError(f"No such pickle file: {path}")
+    with path.open("rb") as fh:
+        obj = pickle.load(fh)
+    if isinstance(obj, list):
+        return obj
+    return [obj]
+
+
+def _infer_env_strategy(env: Any) -> str:
+    """
+    Infer which utility strategy the environment supports.
+    Currently supports Majority Voting ("mv") or Best-of-N ("bon").
+    """
+    ctx = env.sample_context()
+    prompt_id = int(env.prompts[0]) if hasattr(env, "prompts") else 0
+    raw = env.pull(prompt_id, 1, split="test")
+
+    for strategy in ("mv", "bon"):
+        try:
+            env.get_utility(raw, ctx, strategy)
+            return strategy
+        except Exception:
+            continue
+
+    raise ValueError(
+        f"Could not infer strategy for env type={type(env)}; expected mv/bon-compatible env."
+    )
+
+
+def run_from_pickle(
+    pkl_path: str,
+    agent_key: str,
+    budget: int,
+    test_steps: int,
+    seed: int,
+    first_k: int | None = None,
+) -> float:
+    resolved_path = Path(pkl_path)
+    if not resolved_path.is_absolute():
+        resolved_path = PROJECT_ROOT / resolved_path
+    envs = _load_envs_from_pickle(resolved_path.as_posix())
+    if not envs:
+        raise ValueError(f"Pickle file contains no envs: {resolved_path}")
+    if first_k is not None and first_k > 0:
+        envs = envs[: int(first_k)]
+
+    strategy = _infer_env_strategy(envs[0])
+    factories = agent_factories(strategy)
+    if agent_key not in factories:
+        raise KeyError(
+            f"Unknown agent '{agent_key}' for strategy='{strategy}'. Use --list to see valid agent keys."
+        )
+
+    scores: list[float] = []
+    for idx, env in enumerate(envs, start=1):
+        _maybe_resplit(env, seed=seed + idx)
+        agent = factories[agent_key]()
+        agent.train(env=env, budget=int(budget))
+        score = evaluate(agent, env, test_steps=int(test_steps))
+        scores.append(float(score))
+        print(f"env#{idx} avg_utility={score:.4f}")
+
+    mean = float(np.mean(scores))
+    sem = float(np.std(scores, ddof=1) / np.sqrt(len(scores))) if len(scores) > 1 else 0.0
+    print(
+        f"dataset={resolved_path.name} strategy={strategy} agent={agent_key} "
+        f"mean={mean:.4f} sem={sem:.4f} n_envs={len(scores)}"
+    )
+    return mean
+
+
 def _print_list() -> None:
     print("Environments:")
     for k, spec in ENVS.items():
@@ -229,6 +311,14 @@ def _print_list() -> None:
     print(
         "\nTip: MV envs require agents with strategy='mv'; BoN envs require strategy='bon'."
     )
+    data_dir = PROJECT_ROOT / "data"
+    if data_dir.is_dir():
+        pkls = sorted(data_dir.glob("*.pkl"))
+        if pkls:
+            print("\nPickle datasets (optional):")
+            for p in pkls:
+                print(f"  - {p.relative_to(PROJECT_ROOT).as_posix()}")
+            print("  (run with: --pkl <path> --agent <agent> [--first-k K])")
 
 
 def _iter_all_runs(envs: Iterable[str], budget: int, test_steps: int, seed: int) -> None:
@@ -245,9 +335,20 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Minimal IAPO env/agent demo runner.")
     parser.add_argument("--list", action="store_true", help="List available envs and agents.")
     parser.add_argument("--env", default="synth_bernoulli", choices=sorted(ENVS.keys()))
+    parser.add_argument(
+        "--pkl",
+        default="",
+        help="Load env(s) from a pickle file (overrides --env). Example: data/HH_final.pkl",
+    )
     parser.add_argument("--agent", default="psst", help="Agent key (use --list).")
     parser.add_argument("--budget", type=int, default=500, help="Training token budget.")
     parser.add_argument("--test", type=int, default=200, help="Number of test rollouts.")
+    parser.add_argument(
+        "--first-k",
+        type=int,
+        default=0,
+        help="When using --pkl, use only the first K envs from the pickle list (0 = all).",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--run-all", action="store_true", help="Run all agents on all envs.")
     args = parser.parse_args()
@@ -258,6 +359,18 @@ def main() -> None:
 
     if args.run_all:
         _iter_all_runs(ENVS.keys(), budget=args.budget, test_steps=args.test, seed=args.seed)
+        return
+
+    if args.pkl:
+        first_k = int(args.first_k) if int(args.first_k) > 0 else None
+        run_from_pickle(
+            args.pkl,
+            args.agent,
+            budget=args.budget,
+            test_steps=args.test,
+            seed=args.seed,
+            first_k=first_k,
+        )
         return
 
     env_key = args.env
@@ -274,4 +387,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
