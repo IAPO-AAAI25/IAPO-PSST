@@ -1,4 +1,4 @@
-# IAPO (public code)
+# IAPO ( Inference-Aware Prompt Optimization for Aligning Black-Box Large Language Model, AAAI 2025)
 
 This folder is a lightweight/public copy of the IAPO codebase containing:
 
